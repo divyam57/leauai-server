@@ -13,6 +13,14 @@ const { synthesizeSpeech } = require("../lib/tts");
 
 const router = express.Router();
 
+// Faceless Studio is heavy (multiple ffmpeg passes + several API calls per
+// request). Render's free tier only has 512MB RAM — two of these running at
+// once is enough to crash the whole server. This tracks in-flight jobs so we
+// can reject duplicates instead of letting the process run out of memory.
+const activeUserJobs = new Set();
+const MAX_CONCURRENT_JOBS = parseInt(process.env.FACELESS_MAX_CONCURRENT || "1", 10);
+let activeJobCount = 0;
+
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { maxBuffer: 1024 * 1024 * 50 }, (err, stdout, stderr) => {
@@ -70,11 +78,21 @@ function secondsToSrtTime(sec) {
 }
 
 router.post("/", requireAuth, async (req, res) => {
+  const { topic, tone } = req.body;
+  if (!topic) return res.status(400).json({ error: "Provide a `topic` in the request body." });
+
+  if (activeUserJobs.has(req.user.id)) {
+    return res.status(409).json({ error: "You already have a Faceless Studio render in progress. Please wait for it to finish before starting another." });
+  }
+  if (activeJobCount >= MAX_CONCURRENT_JOBS) {
+    return res.status(503).json({ error: "Faceless Studio is at capacity right now — please try again in a minute." });
+  }
+
+  activeUserJobs.add(req.user.id);
+  activeJobCount++;
+
   const tmpDir = path.join(__dirname, "..", "uploads", `faceless_${randomUUID()}`);
   try {
-    const { topic, tone } = req.body;
-    if (!topic) return res.status(400).json({ error: "Provide a `topic` in the request body." });
-
     const missing = ["GEMINI_API_KEY", "PEXELS_API_KEY"].filter((k) => !process.env[k]);
     if (missing.length) {
       return res.status(501).json({ error: `Faceless Studio needs ${missing.join(", ")} set.` });
@@ -177,6 +195,9 @@ router.post("/", requireAuth, async (req, res) => {
     console.error("[faceless] failed:", err.message);
     fs.rmSync(tmpDir, { recursive: true, force: true });
     res.status(err.status || 500).json({ error: err.message });
+  } finally {
+    activeUserJobs.delete(req.user.id);
+    activeJobCount--;
   }
 });
 
