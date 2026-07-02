@@ -23,6 +23,18 @@ fs.mkdirSync(path.join(__dirname, "outputs"), { recursive: true });
 
 app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
 
+// Log every request — without this, Render's Logs tab stays silent even
+// while requests are being processed, making it impossible to tell where
+// a slow request (like Faceless Studio) is stuck.
+app.use((req, res, next) => {
+  const start = Date.now();
+  console.log(`--> ${req.method} ${req.path}`);
+  res.on("finish", () => {
+    console.log(`<-- ${req.method} ${req.path} ${res.statusCode} (${Date.now() - start}ms)`);
+  });
+  next();
+});
+
 // Stripe webhook needs the RAW body — must be mounted BEFORE express.json()
 app.post("/api/billing/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
 

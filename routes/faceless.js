@@ -84,7 +84,9 @@ router.post("/", requireAuth, async (req, res) => {
 
     fs.mkdirSync(tmpDir, { recursive: true });
 
+    console.log("[faceless] generating script…");
     const script = await generateScript(topic, tone);
+    console.log("[faceless] script done");
     const segments = [
       { text: script.hook, visual: script.hook_visual },
       ...script.beats,
@@ -93,10 +95,12 @@ router.post("/", requireAuth, async (req, res) => {
 
     const segmentAudio = [];
     for (let i = 0; i < segments.length; i++) {
+      console.log(`[faceless] generating voice segment ${i + 1}/${segments.length}…`);
       const audioPath = path.join(tmpDir, `vo_${i}.mp3`);
       await generateVoice(segments[i].text, audioPath);
       const duration = await getAudioDuration(audioPath);
       segmentAudio.push({ ...segments[i], audioPath, duration });
+      console.log(`[faceless] voice segment ${i + 1} done (${duration.toFixed(1)}s)`);
     }
 
     const clipPaths = [];
@@ -104,8 +108,10 @@ router.post("/", requireAuth, async (req, res) => {
     const srtLines = [];
     for (let i = 0; i < segmentAudio.length; i++) {
       const seg = segmentAudio[i];
+      console.log(`[faceless] fetching stock footage ${i + 1}/${segmentAudio.length} ("${seg.visual || topic}")…`);
       const rawClip = path.join(tmpDir, `raw_${i}.mp4`);
       await fetchStockClip(seg.visual || topic, rawClip);
+      console.log(`[faceless] footage ${i + 1} downloaded, trimming…`);
 
       const trimmedClip = path.join(tmpDir, `trim_${i}.mp4`);
       await run("ffmpeg", [
@@ -116,24 +122,32 @@ router.post("/", requireAuth, async (req, res) => {
         trimmedClip,
       ]);
       clipPaths.push(trimmedClip);
+      console.log(`[faceless] clip ${i + 1} trimmed`);
 
       srtLines.push(`${i + 1}\n${secondsToSrtTime(cursor)} --> ${secondsToSrtTime(cursor + seg.duration)}\n${seg.text}\n`);
       cursor += seg.duration;
     }
 
+    console.log("[faceless] concatenating video clips…");
     const concatListPath = path.join(tmpDir, "concat.txt");
     fs.writeFileSync(concatListPath, clipPaths.map((p) => `file '${p}'`).join("\n"));
     const silentVideoPath = path.join(tmpDir, "silent.mp4");
     await run("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", concatListPath, "-c", "copy", silentVideoPath]);
+    console.log("[faceless] video concat done");
 
+    console.log("[faceless] concatenating audio segments…");
     const audioConcatListPath = path.join(tmpDir, "audio_concat.txt");
     fs.writeFileSync(audioConcatListPath, segmentAudio.map((s) => `file '${s.audioPath}'`).join("\n"));
     const fullAudioPath = path.join(tmpDir, "full_audio.mp3");
     await run("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", audioConcatListPath, "-c", "copy", fullAudioPath]);
+    console.log("[faceless] audio concat done");
 
+    console.log("[faceless] muxing video + audio…");
     const muxedPath = path.join(tmpDir, "muxed.mp4");
     await run("ffmpeg", ["-y", "-i", silentVideoPath, "-i", fullAudioPath, "-c:v", "copy", "-c:a", "aac", "-shortest", muxedPath]);
+    console.log("[faceless] mux done");
 
+    console.log("[faceless] burning in captions (final pass)…");
     const srtPath = path.join(tmpDir, "captions.srt");
     fs.writeFileSync(srtPath, srtLines.join("\n"), "utf8");
     const outDir = path.join(__dirname, "..", "outputs");
@@ -149,6 +163,7 @@ router.post("/", requireAuth, async (req, res) => {
     ]);
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    console.log("[faceless] done, sending response");
 
     await logJob(req.user.id, "faceless_studio", "done", { topic, tone }, { url: `/outputs/${outFilename}` }, cost);
     res.json({
@@ -159,6 +174,7 @@ router.post("/", requireAuth, async (req, res) => {
       creditsRemaining: newBalance,
     });
   } catch (err) {
+    console.error("[faceless] failed:", err.message);
     fs.rmSync(tmpDir, { recursive: true, force: true });
     res.status(err.status || 500).json({ error: err.message });
   }
