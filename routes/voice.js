@@ -4,7 +4,10 @@ const router = express.Router();
 const { requireAuth } = require("../middleware/auth");
 const { spendCredits, logJob } = require("../lib/credits");
 
-const DEFAULT_VOICE_ID = "21m00Tcm4TlvDq8ikWAM";
+// This must be a voice from YOUR OWN "My Voices" (added via the Voice
+// Library "Add to my voices" button) — ElevenLabs' free/API plans block
+// direct use of library voices that haven't been added to your account.
+const DEFAULT_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "3AMU7jXQuQa3oRvRqUmb";
 
 router.post("/", requireAuth, async (req, res) => {
   try {

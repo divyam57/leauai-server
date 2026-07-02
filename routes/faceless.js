@@ -38,7 +38,8 @@ Respond ONLY with JSON, no markdown fences, no preamble, in this exact shape:
 }
 
 async function generateVoice(text, outPath) {
-  const voiceId = "21m00Tcm4TlvDq8ikWAM";
+  // Must be a voice from your own "My Voices" — see routes/voice.js for why.
+  const voiceId = process.env.ELEVENLABS_VOICE_ID || "3AMU7jXQuQa3oRvRqUmb";
   const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "xi-api-key": process.env.ELEVENLABS_API_KEY, Accept: "audio/mpeg" },
