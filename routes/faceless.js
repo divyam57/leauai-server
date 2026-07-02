@@ -1,5 +1,5 @@
 // Faceless Studio — POST /api/faceless
-// Chain: Gemini (script) -> ElevenLabs (voiceover) -> Pexels (stock clips
+// Chain: Gemini (script) -> Edge TTS (voiceover, free) -> Pexels (stock clips
 // matching each beat) -> ffmpeg (assemble + caption burn-in) -> finished mp4.
 const express = require("express");
 const path = require("path");
@@ -9,6 +9,7 @@ const { randomUUID } = require("crypto");
 const { requireAuth } = require("../middleware/auth");
 const { spendCredits, logJob } = require("../lib/credits");
 const { askGemini, parseJsonReply } = require("../lib/gemini");
+const { synthesizeSpeech } = require("../lib/tts");
 
 const router = express.Router();
 
@@ -38,15 +39,7 @@ Respond ONLY with JSON, no markdown fences, no preamble, in this exact shape:
 }
 
 async function generateVoice(text, outPath) {
-  // Must be a voice from your own "My Voices" — see routes/voice.js for why.
-  const voiceId = process.env.ELEVENLABS_VOICE_ID || "3AMU7jXQuQa3oRvRqUmb";
-  const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "xi-api-key": process.env.ELEVENLABS_API_KEY, Accept: "audio/mpeg" },
-    body: JSON.stringify({ text, model_id: "eleven_multilingual_v2", voice_settings: { stability: 0.5, similarity_boost: 0.75 } }),
-  });
-  if (!response.ok) throw new Error(`ElevenLabs API error: ${await response.text()}`);
-  const buffer = Buffer.from(await response.arrayBuffer());
+  const buffer = await synthesizeSpeech(text);
   fs.writeFileSync(outPath, buffer);
 }
 
@@ -82,7 +75,7 @@ router.post("/", requireAuth, async (req, res) => {
     const { topic, tone } = req.body;
     if (!topic) return res.status(400).json({ error: "Provide a `topic` in the request body." });
 
-    const missing = ["GEMINI_API_KEY", "ELEVENLABS_API_KEY", "PEXELS_API_KEY"].filter((k) => !process.env[k]);
+    const missing = ["GEMINI_API_KEY", "PEXELS_API_KEY"].filter((k) => !process.env[k]);
     if (missing.length) {
       return res.status(501).json({ error: `Faceless Studio needs ${missing.join(", ")} set.` });
     }
