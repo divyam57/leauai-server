@@ -10,7 +10,9 @@ const captionRoute = require("./routes/caption");
 const scriptRoute = require("./routes/script");
 const viralityRoute = require("./routes/virality");
 const voiceRoute = require("./routes/voice");
-const facelessRoute = require("./routes/faceless");
+const titleRoute = require("./routes/title");
+const hookRoute = require("./routes/hook");
+const faketextRoute = require("./routes/faketext");
 const billingRoute = require("./routes/billing");
 const { stripeWebhookHandler } = require("./routes/billing");
 
@@ -58,7 +60,9 @@ app.use("/api/caption", captionRoute);
 app.use("/api/script", scriptRoute);
 app.use("/api/virality", viralityRoute);
 app.use("/api/voice", voiceRoute);
-app.use("/api/faceless", facelessRoute);
+app.use("/api/title", titleRoute);
+app.use("/api/hook", hookRoute);
+app.use("/api/faketext", faketextRoute);
 app.use("/api/billing", billingRoute);
 
 // 404 fallback
