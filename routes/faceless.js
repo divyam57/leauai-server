@@ -77,6 +77,8 @@ function secondsToSrtTime(sec) {
   return `${pad(h)}:${pad(m)}:${pad(s)},${pad(ms, 3)}`;
 }
 
+const JOB_TIMEOUT_MS = parseInt(process.env.FACELESS_TIMEOUT_MS || "240000", 10); // 4 minutes
+
 router.post("/", requireAuth, async (req, res) => {
   const { topic, tone } = req.body;
   if (!topic) return res.status(400).json({ error: "Provide a `topic` in the request body." });
@@ -91,11 +93,15 @@ router.post("/", requireAuth, async (req, res) => {
   activeUserJobs.add(req.user.id);
   activeJobCount++;
 
+  let timedOut = false;
   const tmpDir = path.join(__dirname, "..", "uploads", `faceless_${randomUUID()}`);
-  try {
+
+  async function runPipeline() {
     const missing = ["GEMINI_API_KEY", "PEXELS_API_KEY"].filter((k) => !process.env[k]);
     if (missing.length) {
-      return res.status(501).json({ error: `Faceless Studio needs ${missing.join(", ")} set.` });
+      const err = new Error(`Faceless Studio needs ${missing.join(", ")} set.`);
+      err.status = 501;
+      throw err;
     }
 
     const { newBalance, cost } = await spendCredits(req.user.id, "faceless_studio");
@@ -181,9 +187,16 @@ router.post("/", requireAuth, async (req, res) => {
     ]);
 
     fs.rmSync(tmpDir, { recursive: true, force: true });
-    console.log("[faceless] done, sending response");
+    console.log("[faceless] done");
 
     await logJob(req.user.id, "faceless_studio", "done", { topic, tone }, { url: `/outputs/${outFilename}` }, cost);
+
+    if (timedOut) {
+      // The client already got a timeout response — don't try to write to
+      // a response that's already been sent.
+      console.log("[faceless] result arrived after timeout, discarding");
+      return;
+    }
     res.json({
       url: `/outputs/${outFilename}`,
       hook: script.hook,
@@ -191,10 +204,24 @@ router.post("/", requireAuth, async (req, res) => {
       cta: script.cta,
       creditsRemaining: newBalance,
     });
+  }
+
+  try {
+    await Promise.race([
+      runPipeline(),
+      new Promise((_, reject) =>
+        setTimeout(() => {
+          timedOut = true;
+          reject(new Error("Faceless Studio took too long and timed out. Please try again — if this keeps happening, try a shorter topic."));
+        }, JOB_TIMEOUT_MS)
+      ),
+    ]);
   } catch (err) {
     console.error("[faceless] failed:", err.message);
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-    res.status(err.status || 500).json({ error: err.message });
+    if (!timedOut) fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (!res.headersSent) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
   } finally {
     activeUserJobs.delete(req.user.id);
     activeJobCount--;
