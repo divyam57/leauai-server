@@ -33,7 +33,7 @@ For each beat, also give a 2-4 word visual search keyword describing what footag
 Respond ONLY with JSON, no markdown fences, no preamble, in this exact shape:
 {"hook": "first line", "hook_visual": "2-4 word search term", "beats": [{"text": "beat text", "visual": "2-4 word search term"}, ...4 beats total], "cta": "closing line", "cta_visual": "2-4 word search term"}`;
 
-  const text = await askGemini(prompt, 700);
+  const text = await askGemini(prompt, 900, true);
   return parseJsonReply(text);
 }
 

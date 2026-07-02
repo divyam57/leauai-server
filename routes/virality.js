@@ -16,7 +16,7 @@ router.post("/", requireAuth, async (req, res) => {
 Respond ONLY with JSON, no markdown fences, no preamble:
 {"hook_score": 0-10, "retention_score": 0-10, "pacing_score": 0-10, "notes": "2-3 sentences of specific feedback"}`;
 
-    const text = await askGemini(prompt, 400);
+    const text = await askGemini(prompt, 500, true);
 
     let result;
     try {

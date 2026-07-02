@@ -17,7 +17,7 @@ Tone: ${tone || "engaging, conversational"}.
 Respond ONLY with JSON in this exact shape, no markdown fences, no preamble:
 {"hook": "first line, must earn the next 3 seconds", "beats": ["beat 1", "beat 2", "beat 3", "beat 4"], "cta": "closing line"}`;
 
-    const text = await askGemini(prompt, 600);
+    const text = await askGemini(prompt, 800, true);
 
     let script;
     try {
