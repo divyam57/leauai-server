@@ -14,14 +14,14 @@ router.get("/list", (req, res) => {
 
 router.post("/", requireAuth, async (req, res) => {
   try {
-    const { text, voiceId } = req.body;
+    const { text, voiceId, speed } = req.body;
     if (!text) return res.status(400).json({ error: "Provide `text` to synthesize." });
 
     const { newBalance, cost } = await spendCredits(req.user.id, "voice_forge");
 
     let buffer;
     try {
-      buffer = await synthesizeSpeech(text, voiceId);
+      buffer = await synthesizeSpeech(text, voiceId, typeof speed === "number" ? speed : parseFloat(speed));
     } catch (e) {
       return res.status(502).json({ error: `Voice synthesis error: ${e.message}` });
     }
