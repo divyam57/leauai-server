@@ -1,10 +1,16 @@
-// Voice Forge — POST /api/voice
+// Voice Forge — POST /api/voice, GET /api/voice/list
 // Free text-to-speech (Microsoft Edge TTS) — no API key required.
 const express = require("express");
 const router = express.Router();
 const { requireAuth } = require("../middleware/auth");
 const { spendCredits, logJob } = require("../lib/credits");
-const { synthesizeSpeech } = require("../lib/tts");
+const { synthesizeSpeech, VOICE_PRESETS } = require("../lib/tts");
+
+// Public list of available voices (no auth needed — just metadata, not audio).
+router.get("/list", (req, res) => {
+  const voices = Object.entries(VOICE_PRESETS).map(([id, v]) => ({ id, label: v.label }));
+  res.json({ voices });
+});
 
 router.post("/", requireAuth, async (req, res) => {
   try {
