@@ -55,6 +55,7 @@ async function analyzeLoudness(filePath) {
   try {
     const { stderr } = await run("ffmpeg", [
       "-i", filePath,
+      "-vn", // audio-only — skip decoding video frames, we don't need them for this
       "-filter_complex", "ebur128=peak=true",
       "-f", "null", "-",
     ]);
@@ -112,13 +113,17 @@ router.post("/", requireAuth, upload.single("video"), async (req, res) => {
 
     const { newBalance, cost } = await spendCredits(req.user.id, "auto_clip");
 
+    console.log(`[clip] analyzing "${req.file.originalname}" (${(req.file.size / 1024 / 1024).toFixed(1)}MB)…`);
+    const t0 = Date.now();
     const duration = (await getDuration(req.file.path)) || 30;
+    console.log(`[clip] duration: ${duration.toFixed(1)}s`);
 
     // Decide clip length and how many clips fit.
     const clipLength = Math.max(3, Math.min(CLIP_LENGTH, duration - 0.5));
     const canFitTwo = duration >= CLIP_LENGTH * 2 + MIN_GAP;
 
     const points = await analyzeLoudness(req.file.path);
+    console.log(`[clip] loudness analysis done in ${((Date.now() - t0) / 1000).toFixed(1)}s (${points.length} data points)`);
 
     const ranges = [];
     const firstStart = findBestWindow(points, duration, clipLength, null);
@@ -154,6 +159,7 @@ router.post("/", requireAuth, upload.single("video"), async (req, res) => {
     const results = [];
     for (let i = 0; i < ranges.length; i++) {
       const r = ranges[i];
+      console.log(`[clip] cutting clip ${i + 1}/${ranges.length} (${r.start.toFixed(1)}s-${r.end.toFixed(1)}s)…`);
       const filename = `clip_${randomUUID()}.mp4`;
       const outPath = path.join(outDir, filename);
       await ffmpegCut(req.file.path, r.start.toFixed(2), r.end.toFixed(2), outPath);
@@ -164,6 +170,7 @@ router.post("/", requireAuth, upload.single("video"), async (req, res) => {
         end: Math.round(r.end),
       });
     }
+    console.log(`[clip] done, total time ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 
     fs.unlink(req.file.path, () => {});
     await logJob(req.user.id, "auto_clip", "done", { duration }, { clips: results }, cost);
