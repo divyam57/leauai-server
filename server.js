@@ -23,7 +23,7 @@ const PORT = process.env.PORT || 8787;
 fs.mkdirSync(path.join(__dirname, "uploads"), { recursive: true });
 fs.mkdirSync(path.join(__dirname, "outputs"), { recursive: true });
 
-app.use(cors({ origin: process.env.FRONTEND_URL || "*" }));
+app.use(cors({ origin: true }));
 
 // Log every request — without this, Render's Logs tab stays silent even
 // while requests are being processed, making it impossible to tell where
