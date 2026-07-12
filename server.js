@@ -8,7 +8,6 @@ const fs = require("fs");
 const clipRoute = require("./routes/clip");
 const captionRoute = require("./routes/caption");
 const scriptRoute = require("./routes/script");
-const viralityRoute = require("./routes/virality");
 const voiceRoute = require("./routes/voice");
 const titleRoute = require("./routes/title");
 const hookRoute = require("./routes/hook");
@@ -61,7 +60,6 @@ app.get("/health", (req, res) => {
 app.use("/api/clip", clipRoute);
 app.use("/api/caption", captionRoute);
 app.use("/api/script", scriptRoute);
-app.use("/api/virality", viralityRoute);
 app.use("/api/voice", voiceRoute);
 app.use("/api/title", titleRoute);
 app.use("/api/hook", hookRoute);
