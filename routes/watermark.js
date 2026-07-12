@@ -1,9 +1,9 @@
 // Watermark Remover — POST /api/watermark
 // Uses ffmpeg's "delogo" filter to blend out a rectangular region (where the
-// watermark/logo sits) using surrounding pixels. This is a free, real
-// technique — but it's a basic blend, not true AI inpainting, so results
-// are best on solid-color logos over simple backgrounds, not perfect on
-// busy/detailed photos.
+// watermark/logo sits) across the whole video, using surrounding pixels.
+// This is a free, real technique — but it's a basic blend, not true AI
+// inpainting, so results are best on solid-color logos over simple
+// backgrounds, not perfect on busy/detailed footage.
 const express = require("express");
 const multer = require("multer");
 const { execFile } = require("child_process");
@@ -18,14 +18,14 @@ const upload = multer({ dest: path.join(__dirname, "..", "uploads") });
 
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
+    execFile(cmd, args, { maxBuffer: 1024 * 1024 * 50 }, (err, stdout, stderr) => {
       if (err) return reject(new Error(stderr || err.message));
       resolve({ stdout, stderr });
     });
   });
 }
 
-async function getImageDimensions(filePath) {
+async function getVideoDimensions(filePath) {
   const { stdout } = await run("ffprobe", [
     "-v", "error", "-select_streams", "v:0",
     "-show_entries", "stream=width,height",
@@ -35,37 +35,38 @@ async function getImageDimensions(filePath) {
   return { width: w, height: h };
 }
 
-router.post("/", requireAuth, upload.single("image"), async (req, res) => {
+router.post("/", requireAuth, upload.single("video"), async (req, res) => {
   try {
-    if (!req.file) return res.status(400).json({ error: "No image uploaded (field name: 'image')." });
+    if (!req.file) return res.status(400).json({ error: "No video uploaded (field name: 'video')." });
 
-    // Region as percentages of the image (0-100), so the frontend doesn't
-    // need to know the actual pixel dimensions.
+    // Region as percentages of the frame (0-100) — the frontend computes
+    // these from a drag-to-select box drawn over a preview of the video.
     const xPct = parseFloat(req.body.x);
     const yPct = parseFloat(req.body.y);
     const wPct = parseFloat(req.body.width);
     const hPct = parseFloat(req.body.height);
-    if ([xPct, yPct, wPct, hPct].some((v) => isNaN(v) || v < 0)) {
-      return res.status(400).json({ error: "Provide x, y, width, height as percentages (0-100) marking the watermark's location." });
+    if ([xPct, yPct, wPct, hPct].some((v) => isNaN(v) || v < 0) || wPct <= 0 || hPct <= 0) {
+      return res.status(400).json({ error: "Drag a box over the watermark in the preview first." });
     }
 
     const { newBalance, cost } = await spendCredits(req.user.id, "watermark_remover");
 
-    const { width, height } = await getImageDimensions(req.file.path);
-    const x = Math.round((xPct / 100) * width);
-    const y = Math.round((yPct / 100) * height);
+    const { width, height } = await getVideoDimensions(req.file.path);
+    const x = Math.max(0, Math.round((xPct / 100) * width));
+    const y = Math.max(0, Math.round((yPct / 100) * height));
     const w = Math.max(8, Math.round((wPct / 100) * width));
     const h = Math.max(8, Math.round((hPct / 100) * height));
 
     const outDir = path.join(__dirname, "..", "outputs");
     fs.mkdirSync(outDir, { recursive: true });
-    const outFilename = `clean_${randomUUID()}.png`;
+    const outFilename = `clean_${randomUUID()}.mp4`;
     const outPath = path.join(outDir, outFilename);
 
     await run("ffmpeg", [
       "-y", "-i", req.file.path,
       "-vf", `delogo=x=${x}:y=${y}:w=${w}:h=${h}:show=0`,
-      "-frames:v", "1",
+      "-c:v", "libx264", "-preset", "veryfast",
+      "-c:a", "copy",
       outPath,
     ]);
 
