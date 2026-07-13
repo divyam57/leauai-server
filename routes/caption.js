@@ -9,7 +9,10 @@ const { requireAuth } = require("../middleware/auth");
 const { spendCredits, logJob } = require("../lib/credits");
 
 const router = express.Router();
-const upload = multer({ dest: path.join(__dirname, "..", "uploads") });
+const upload = multer({
+  dest: path.join(__dirname, "..", "uploads"),
+  limits: { fileSize: 250 * 1024 * 1024 }, // 250MB cap — bigger risks crashing the free-tier server (512MB RAM)
+});
 
 function secondsToSrtTime(sec) {
   const h = Math.floor(sec / 3600);
@@ -42,7 +45,17 @@ function ffmpegBurnCaptions(inputPath, srtPath, outputPath, styleKey) {
   });
 }
 
-router.post("/", requireAuth, upload.single("video"), async (req, res) => {
+router.post("/", requireAuth, (req, res, next) => {
+  upload.single("video")(req, res, (err) => {
+    if (err) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return res.status(413).json({ error: "That video is too large (max 250MB on the free tier). Try a shorter clip or a lower-resolution export." });
+      }
+      return res.status(400).json({ error: err.message });
+    }
+    next();
+  });
+}, async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: "No video file uploaded (field name: 'video')." });
 
