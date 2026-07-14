@@ -19,6 +19,9 @@ const upload = multer({
   limits: { fileSize: 250 * 1024 * 1024 }, // 250MB cap — bigger risks crashing the free-tier server (512MB RAM)
 });
 
+const MAX_DURATION_S = 180; // 3 minutes — longer videos take too long to re-encode on a free-tier server
+const MAX_WIDTH = 1280; // downscale — this is what actually keeps memory use in check, not the file size
+
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { maxBuffer: 1024 * 1024 * 50 }, (err, stdout, stderr) => {
@@ -28,14 +31,22 @@ function run(cmd, args) {
   });
 }
 
-async function getVideoDimensions(filePath) {
+async function getVideoInfo(filePath) {
   const { stdout } = await run("ffprobe", [
     "-v", "error", "-select_streams", "v:0",
-    "-show_entries", "stream=width,height",
-    "-of", "csv=p=0:s=x", filePath,
+    "-show_entries", "stream=width,height:format=duration",
+    "-of", "default=noprint_wrappers=1", filePath,
   ]);
-  const [w, h] = stdout.trim().split("x").map(Number);
-  return { width: w, height: h };
+  const info = {};
+  for (const line of stdout.split("\n")) {
+    const [key, val] = line.split("=");
+    if (key && val) info[key.trim()] = val.trim();
+  }
+  return {
+    width: parseInt(info.width, 10),
+    height: parseInt(info.height, 10),
+    duration: parseFloat(info.duration),
+  };
 }
 
 router.post("/", requireAuth, (req, res, next) => {
@@ -62,13 +73,23 @@ router.post("/", requireAuth, (req, res, next) => {
       return res.status(400).json({ error: "Drag a box over the watermark in the preview first." });
     }
 
+    const { width, height, duration } = await getVideoInfo(req.file.path);
+    if (duration > MAX_DURATION_S) {
+      fs.unlink(req.file.path, () => {});
+      return res.status(400).json({ error: `That video is too long (max ${MAX_DURATION_S / 60} minutes on the free tier). Trim it first and try again.` });
+    }
+
     const { newBalance, cost } = await spendCredits(req.user.id, "watermark_remover");
 
-    const { width, height } = await getVideoDimensions(req.file.path);
-    const x = Math.max(0, Math.round((xPct / 100) * width));
-    const y = Math.max(0, Math.round((yPct / 100) * height));
-    const w = Math.max(8, Math.round((wPct / 100) * width));
-    const h = Math.max(8, Math.round((hPct / 100) * height));
+    // Compute the region against the POST-DOWNSCALE dimensions (percentages
+    // are resolution-independent, so this just needs the scale filter placed
+    // before delogo in the same chain).
+    const targetWidth = Math.min(MAX_WIDTH, width);
+    const targetHeight = Math.round(height * (targetWidth / width / 2)) * 2; // keep even for libx264
+    const x = Math.max(0, Math.round((xPct / 100) * targetWidth));
+    const y = Math.max(0, Math.round((yPct / 100) * targetHeight));
+    const w = Math.max(8, Math.round((wPct / 100) * targetWidth));
+    const h = Math.max(8, Math.round((hPct / 100) * targetHeight));
 
     const outDir = path.join(__dirname, "..", "outputs");
     fs.mkdirSync(outDir, { recursive: true });
@@ -77,8 +98,9 @@ router.post("/", requireAuth, (req, res, next) => {
 
     await run("ffmpeg", [
       "-y", "-i", req.file.path,
-      "-vf", `delogo=x=${x}:y=${y}:w=${w}:h=${h}:show=0`,
+      "-vf", `scale=${targetWidth}:${targetHeight},delogo=x=${x}:y=${y}:w=${w}:h=${h}:show=0`,
       "-c:v", "libx264", "-preset", "veryfast",
+      "-threads", "1",
       "-c:a", "copy",
       outPath,
     ]);
