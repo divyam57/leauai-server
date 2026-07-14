@@ -12,6 +12,8 @@
 //   - Video long enough for two distinct, non-overlapping best moments -> 2 clips.
 //   - Never fails outright: falls back to sensible defaults if analysis is
 //     inconclusive.
+//   - Hard-capped at 100s total so a stuck request can never hang forever —
+//     the whole point is this tool has to feel instant.
 const express = require("express");
 const multer = require("multer");
 const { execFile } = require("child_process");
@@ -29,14 +31,17 @@ const upload = multer({
 
 const CLIP_LENGTH = 20; // seconds, target length per clip
 const MIN_GAP = 5; // seconds required between two clips so they don't overlap
+const JOB_TIMEOUT_MS = parseInt(process.env.CLIP_TIMEOUT_MS || "100000", 10); // 100s hard cap
+
+// Prevents overlapping heavy jobs from piling up and crashing the free-tier
+// server (512MB RAM) — same pattern that fixed Faceless Studio's hangs.
+const activeUserJobs = new Set();
+const MAX_CONCURRENT_JOBS = parseInt(process.env.CLIP_MAX_CONCURRENT || "2", 10);
+let activeJobCount = 0;
 
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
     execFile(cmd, args, { maxBuffer: 1024 * 1024 * 50 }, (err, stdout, stderr) => {
-      // ffmpeg writes its normal analysis output to stderr even on success,
-      // so we resolve with stderr regardless of `err` for filters like
-      // ebur128 that always exit non-zero-ish noise — but a real failure
-      // (bad file, missing codec) still needs to reject.
       if (err && !stdout && !stderr) return reject(new Error(err.message));
       resolve({ stdout, stderr });
     });
@@ -52,13 +57,11 @@ async function getDuration(filePath) {
   return isNaN(val) ? null : val;
 }
 
-// Runs ffmpeg's loudness meter over the whole file and returns a time
-// series of { t, m } (timestamp in seconds, momentary loudness in LUFS).
 async function analyzeLoudness(filePath) {
   try {
     const { stderr } = await run("ffmpeg", [
       "-i", filePath,
-      "-vn", // audio-only — skip decoding video frames, we don't need them for this
+      "-vn",
       "-filter_complex", "ebur128=peak=true",
       "-f", "null", "-",
     ]);
@@ -79,13 +82,11 @@ async function analyzeLoudness(filePath) {
   }
 }
 
-// Finds the start time of the loudest sustained window of `length` seconds,
-// optionally excluding a region already used by another chosen clip.
 function findBestWindow(points, duration, length, exclude) {
   if (!points.length) return null;
   let bestStart = 0;
   let bestScore = -Infinity;
-  const step = 1; // seconds
+  const step = 1;
   for (let start = 0; start <= duration - length; start += step) {
     const end = start + length;
     if (exclude && start < exclude.end + MIN_GAP && end > exclude.start - MIN_GAP) continue;
@@ -101,11 +102,8 @@ function ffmpegCut(inputPath, start, end, outputPath) {
   return new Promise((resolve, reject) => {
     const args = [
       "-y", "-ss", String(start), "-to", String(end), "-i", inputPath,
-      // Cap resolution — short-form clips don't need 4K/high-res source,
-      // and encoding large frames is what actually exhausts memory on a
-      // free-tier (512MB RAM) server, not the source file size itself.
       "-vf", "scale='min(1280,iw)':-2:flags=fast_bilinear",
-      "-c:v", "libx264", "-c:a", "aac", "-preset", "veryfast",
+      "-c:v", "libx264", "-c:a", "aac", "-preset", "ultrafast",
       "-threads", "1",
       outputPath,
     ];
@@ -127,9 +125,22 @@ router.post("/", requireAuth, (req, res, next) => {
     next();
   });
 }, async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "No video file uploaded (field name: 'video')." });
+  if (!req.file) return res.status(400).json({ error: "No video file uploaded (field name: 'video')." });
 
+  if (activeUserJobs.has(req.user.id)) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(409).json({ error: "You already have a clip render in progress. Please wait for it to finish before starting another." });
+  }
+  if (activeJobCount >= MAX_CONCURRENT_JOBS) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(503).json({ error: "Auto Clip is at capacity right now — please try again in a minute." });
+  }
+
+  activeUserJobs.add(req.user.id);
+  activeJobCount++;
+  let timedOut = false;
+
+  async function runPipeline() {
     const { newBalance, cost } = await spendCredits(req.user.id, "auto_clip");
 
     console.log(`[clip] analyzing "${req.file.originalname}" (${(req.file.size / 1024 / 1024).toFixed(1)}MB)…`);
@@ -137,7 +148,6 @@ router.post("/", requireAuth, (req, res, next) => {
     const duration = (await getDuration(req.file.path)) || 30;
     console.log(`[clip] duration: ${duration.toFixed(1)}s`);
 
-    // Decide clip length and how many clips fit.
     const clipLength = Math.max(3, Math.min(CLIP_LENGTH, duration - 0.5));
     const canFitTwo = duration >= CLIP_LENGTH * 2 + MIN_GAP;
 
@@ -149,8 +159,6 @@ router.post("/", requireAuth, (req, res, next) => {
     if (firstStart !== null) {
       ranges.push({ start: firstStart, end: Math.min(duration, firstStart + clipLength) });
     } else {
-      // Analysis inconclusive (e.g. silent video) — fall back to a
-      // sensible default instead of failing outright.
       const fallbackStart = Math.max(0, (duration - clipLength) / 2);
       ranges.push({ start: fallbackStart, end: Math.min(duration, fallbackStart + clipLength) });
     }
@@ -160,7 +168,6 @@ router.post("/", requireAuth, (req, res, next) => {
       if (secondStart !== null) {
         ranges.push({ start: secondStart, end: Math.min(duration, secondStart + clipLength) });
       } else {
-        // Fallback second clip: as far from the first as possible.
         const fallbackStart = ranges[0].start < duration / 2
           ? Math.max(ranges[0].end + MIN_GAP, duration - clipLength)
           : 0;
@@ -193,10 +200,33 @@ router.post("/", requireAuth, (req, res, next) => {
 
     fs.unlink(req.file.path, () => {});
     await logJob(req.user.id, "auto_clip", "done", { duration }, { clips: results }, cost);
+
+    if (timedOut) {
+      console.log("[clip] result arrived after timeout, discarding");
+      return;
+    }
     res.json({ clips: results, creditsRemaining: newBalance });
+  }
+
+  try {
+    await Promise.race([
+      runPipeline(),
+      new Promise((_, reject) =>
+        setTimeout(() => {
+          timedOut = true;
+          reject(new Error("This video took too long to process. Try a shorter video, or try again — if this keeps happening, the file may be an unusual format."));
+        }, JOB_TIMEOUT_MS)
+      ),
+    ]);
   } catch (err) {
-    if (req.file) fs.unlink(req.file.path, () => {});
-    res.status(err.status || 500).json({ error: err.message });
+    console.error("[clip] failed:", err.message);
+    if (!timedOut && req.file) fs.unlink(req.file.path, () => {});
+    if (!res.headersSent) {
+      res.status(err.status || 500).json({ error: err.message });
+    }
+  } finally {
+    activeUserJobs.delete(req.user.id);
+    activeJobCount--;
   }
 });
 
