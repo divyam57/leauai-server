@@ -12,8 +12,10 @@
 //   - Video long enough for two distinct, non-overlapping best moments -> 2 clips.
 //   - Never fails outright: falls back to sensible defaults if analysis is
 //     inconclusive.
-//   - Hard-capped at 100s total so a stuck request can never hang forever —
-//     the whole point is this tool has to feel instant.
+//   - Hard-capped so a stuck request can never hang forever, and — critically
+//     — the underlying ffmpeg process is actually KILLED on timeout instead
+//     of left running in the background, which was silently eating CPU and
+//     making every subsequent request slower and slower.
 const express = require("express");
 const multer = require("multer");
 const { execFile } = require("child_process");
@@ -26,45 +28,49 @@ const { spendCredits, logJob } = require("../lib/credits");
 const router = express.Router();
 const upload = multer({
   dest: path.join(__dirname, "..", "uploads"),
-  limits: { fileSize: 250 * 1024 * 1024 }, // 250MB cap — bigger risks crashing the free-tier server (512MB RAM)
+  limits: { fileSize: 250 * 1024 * 1024 },
 });
 
-const CLIP_LENGTH = 20; // seconds, target length per clip
-const MIN_GAP = 5; // seconds required between two clips so they don't overlap
-const JOB_TIMEOUT_MS = parseInt(process.env.CLIP_TIMEOUT_MS || "100000", 10); // 100s hard cap
+const CLIP_LENGTH = 20;
+const MIN_GAP = 5;
+const JOB_TIMEOUT_MS = parseInt(process.env.CLIP_TIMEOUT_MS || "150000", 10); // 150s hard cap
 
-// Prevents overlapping heavy jobs from piling up and crashing the free-tier
-// server (512MB RAM) — same pattern that fixed Faceless Studio's hangs.
 const activeUserJobs = new Set();
-const MAX_CONCURRENT_JOBS = parseInt(process.env.CLIP_MAX_CONCURRENT || "2", 10);
+const MAX_CONCURRENT_JOBS = parseInt(process.env.CLIP_MAX_CONCURRENT || "1", 10); // 1 at a time — free tier CPU can't handle more
 let activeJobCount = 0;
 
-function run(cmd, args) {
+// Tracks the currently-running ffmpeg/ffprobe child process for THIS
+// request so we can kill it if the request times out. Without this, a
+// timed-out job's ffmpeg process kept running in the background, eating
+// CPU and making every subsequent request slower.
+function run(cmd, args, childTracker) {
   return new Promise((resolve, reject) => {
-    execFile(cmd, args, { maxBuffer: 1024 * 1024 * 50 }, (err, stdout, stderr) => {
+    const child = execFile(cmd, args, { maxBuffer: 1024 * 1024 * 50 }, (err, stdout, stderr) => {
+      if (childTracker) childTracker.current = null;
       if (err && !stdout && !stderr) return reject(new Error(err.message));
       resolve({ stdout, stderr });
     });
+    if (childTracker) childTracker.current = child;
   });
 }
 
-async function getDuration(filePath) {
+async function getDuration(filePath, childTracker) {
   const { stdout } = await run("ffprobe", [
     "-v", "error", "-show_entries", "format=duration",
     "-of", "default=noprint_wrappers=1:nokey=1", filePath,
-  ]);
+  ], childTracker);
   const val = parseFloat(stdout.trim());
   return isNaN(val) ? null : val;
 }
 
-async function analyzeLoudness(filePath) {
+async function analyzeLoudness(filePath, childTracker) {
   try {
     const { stderr } = await run("ffmpeg", [
       "-i", filePath,
       "-vn",
       "-filter_complex", "ebur128=peak=true",
       "-f", "null", "-",
-    ]);
+    ], childTracker);
     const points = [];
     for (const line of stderr.split("\n")) {
       if (!line.includes("Parsed_ebur128") || !line.includes("M:")) continue;
@@ -98,7 +104,7 @@ function findBestWindow(points, duration, length, exclude) {
   return bestScore === -Infinity ? null : bestStart;
 }
 
-function ffmpegCut(inputPath, start, end, outputPath) {
+function ffmpegCut(inputPath, start, end, outputPath, childTracker) {
   return new Promise((resolve, reject) => {
     const args = [
       "-y", "-ss", String(start), "-to", String(end), "-i", inputPath,
@@ -107,10 +113,12 @@ function ffmpegCut(inputPath, start, end, outputPath) {
       "-threads", "1",
       outputPath,
     ];
-    execFile("ffmpeg", args, { maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
+    const child = execFile("ffmpeg", args, { maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
+      if (childTracker) childTracker.current = null;
       if (err) return reject(new Error(stderr || err.message));
       resolve(outputPath);
     });
+    if (childTracker) childTracker.current = child;
   });
 }
 
@@ -139,19 +147,20 @@ router.post("/", requireAuth, (req, res, next) => {
   activeUserJobs.add(req.user.id);
   activeJobCount++;
   let timedOut = false;
+  const childTracker = { current: null }; // tracks whatever ffmpeg/ffprobe process is running right now
 
   async function runPipeline() {
     const { newBalance, cost } = await spendCredits(req.user.id, "auto_clip");
 
     console.log(`[clip] analyzing "${req.file.originalname}" (${(req.file.size / 1024 / 1024).toFixed(1)}MB)…`);
     const t0 = Date.now();
-    const duration = (await getDuration(req.file.path)) || 30;
+    const duration = (await getDuration(req.file.path, childTracker)) || 30;
     console.log(`[clip] duration: ${duration.toFixed(1)}s`);
 
     const clipLength = Math.max(3, Math.min(CLIP_LENGTH, duration - 0.5));
     const canFitTwo = duration >= CLIP_LENGTH * 2 + MIN_GAP;
 
-    const points = await analyzeLoudness(req.file.path);
+    const points = await analyzeLoudness(req.file.path, childTracker);
     console.log(`[clip] loudness analysis done in ${((Date.now() - t0) / 1000).toFixed(1)}s (${points.length} data points)`);
 
     const ranges = [];
@@ -188,7 +197,7 @@ router.post("/", requireAuth, (req, res, next) => {
       console.log(`[clip] cutting clip ${i + 1}/${ranges.length} (${r.start.toFixed(1)}s-${r.end.toFixed(1)}s)…`);
       const filename = `clip_${randomUUID()}.mp4`;
       const outPath = path.join(outDir, filename);
-      await ffmpegCut(req.file.path, r.start.toFixed(2), r.end.toFixed(2), outPath);
+      await ffmpegCut(req.file.path, r.start.toFixed(2), r.end.toFixed(2), outPath, childTracker);
       results.push({
         label: ranges.length > 1 ? `Best moment ${i + 1}` : "Best moment",
         url: `/outputs/${filename}`,
@@ -214,7 +223,14 @@ router.post("/", requireAuth, (req, res, next) => {
       new Promise((_, reject) =>
         setTimeout(() => {
           timedOut = true;
-          reject(new Error("This video took too long to process. Try a shorter video, or try again — if this keeps happening, the file may be an unusual format."));
+          // Critical: actually kill the ffmpeg process instead of letting
+          // it keep running in the background — otherwise it keeps eating
+          // CPU and makes every subsequent request slower.
+          if (childTracker.current) {
+            console.log("[clip] timeout — killing ffmpeg process");
+            childTracker.current.kill("SIGKILL");
+          }
+          reject(new Error("This video took too long to process. Try a shorter video, or try again in a minute."));
         }, JOB_TIMEOUT_MS)
       ),
     ]);
