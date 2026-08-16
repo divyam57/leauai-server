@@ -5,18 +5,10 @@ const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
 
-const clipRoute = require("./routes/clip");
-const captionRoute = require("./routes/caption");
-const scriptRoute = require("./routes/script");
-const voiceRoute = require("./routes/voice");
-const titleRoute = require("./routes/title");
-const hookRoute = require("./routes/hook");
-const faketextRoute = require("./routes/faketext");
-const downloadRoute = require("./routes/download");
-const imageRoute = require("./routes/image");
-const watermarkRoute = require("./routes/watermark");
-const billingRoute = require("./routes/billing");
-const { stripeWebhookHandler } = require("./routes/billing");
+const clientsRoute = require("./routes/clients");
+const proposalsRoute = require("./routes/proposals");
+const profileRoute = require("./routes/profile");
+const dashboardRoute = require("./routes/dashboard");
 
 const app = express();
 const PORT = process.env.PORT || 8787;
@@ -27,9 +19,7 @@ fs.mkdirSync(path.join(__dirname, "outputs"), { recursive: true });
 
 app.use(cors({ origin: true }));
 
-// Log every request — without this, Render's Logs tab stays silent even
-// while requests are being processed, making it impossible to tell where
-// a slow request (like Faceless Studio) is stuck.
+// Log every request — helps debugging via Render's Logs tab
 app.use((req, res, next) => {
   const start = Date.now();
   console.log(`--> ${req.method} ${req.path}`);
@@ -39,47 +29,36 @@ app.use((req, res, next) => {
   next();
 });
 
-// Stripe webhook needs the RAW body — must be mounted BEFORE express.json()
-app.post("/api/billing/webhook", express.raw({ type: "application/json" }), stripeWebhookHandler);
-
-// Everything else uses normal JSON body parsing
 app.use(express.json());
 
-// Serve rendered output files (clips, captioned videos, faceless videos)
+// Serve uploaded logos etc.
 app.use("/outputs", express.static(path.join(__dirname, "outputs")));
 
 // Health check — useful for Render to confirm the service is alive
 app.get("/", (req, res) => {
-  res.json({ status: "ok", service: "leauai-server" });
+  res.json({ status: "ok", service: "roxbow-server" });
 });
 app.get("/health", (req, res) => {
   res.json({ status: "ok" });
 });
 
-// Tool routes
-app.use("/api/clip", clipRoute);
-app.use("/api/caption", captionRoute);
-app.use("/api/script", scriptRoute);
-app.use("/api/voice", voiceRoute);
-app.use("/api/title", titleRoute);
-app.use("/api/hook", hookRoute);
-app.use("/api/faketext", faketextRoute);
-app.use("/api/download", downloadRoute);
-app.use("/api/image", imageRoute);
-app.use("/api/watermark", watermarkRoute);
-app.use("/api/billing", billingRoute);
+// Routes
+app.use("/api/clients", clientsRoute);
+app.use("/api/proposals", proposalsRoute);
+app.use("/api/profile", profileRoute);
+app.use("/api/dashboard", dashboardRoute);
 
 // 404 fallback
 app.use((req, res) => {
   res.status(404).json({ error: "Not found" });
 });
 
-// Global error handler (catches anything that slips past try/catch in routes)
+// Global error handler
 app.use((err, req, res, next) => {
   console.error("Unhandled error:", err);
   res.status(500).json({ error: "Internal server error" });
 });
 
 app.listen(PORT, () => {
-  console.log(`leauai-server listening on port ${PORT}`);
+  console.log(`roxbow-server listening on port ${PORT}`);
 });
